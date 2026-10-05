@@ -852,3 +852,17 @@ describe('play mode', () => {
     expect(nextRepeat('Music', undefined)).toBe('all')
   })
 })
+
+describe('status for a named app', () => {
+  test('status with app reports that app, not the active one', async ($, on) => {
+    fakeHost(on, [TRACK, { ...TRACK, app: 'Spotify', state: 'paused', id: 'spotify:track:9', name: 'INORIBANA', artist: '平井 大' }])
+    const ran = await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status', app: 'Spotify' })
+    expect(String(ran.result)).toContain('Spotify is paused: "INORIBANA" by 平井 大')
+  })
+
+  test('status for an app with nothing loaded or closed says so', async ($, on) => {
+    fakeHost(on, [TRACK, undefined])
+    const closed = await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status', app: 'Spotify' })
+    expect(String(closed.result)).toBe('Spotify is not running.')
+  })
+})

@@ -454,7 +454,15 @@ export const register: Register = on => {
     const action = String(e.action)
     const app = APPS.find(a => a === e.app)
     const value = typeof e.value === 'number' ? e.value : undefined
-    if (action === 'status') return { result: describe(await poll($)) }
+    if (action === 'status') {
+      const active = await poll($)
+      if (app === undefined) return { result: describe(active) }
+      // A named app reports itself, not whichever app happens to be active.
+      const player = (await read($, playersAtom)).find(p => p.app === app)
+      if (player === undefined || !player.isInstalled) return { result: `${app} is not installed.` }
+      if (!player.isRunning) return { result: `${app} is not running.` }
+      return { result: player.track === null ? `${app} has nothing loaded.` : describe(player.track) }
+    }
     if (action === 'list_playlists' || action === 'play_playlist') {
       if (app === 'Spotify') return { deny: 'Playlists are only supported for Apple Music.' }
       if (action === 'list_playlists') {

@@ -1,0 +1,9 @@
+{
+  "name": "now-playing",
+  "version": "0.3.0",
+  "description": "Now Playing pane, status line and model tool for Apple Music and Spotify on macOS",
+  "author": { "name": "Jimmy Hsiao", "url": "https://github.com/Fatmylin" },
+  "repository": "https://github.com/Fatmylin/now-playing",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,12 @@
+{
+  "name": "now-playing",
+  "description": "Now Playing pane for Apple Music and Spotify in Claude Code",
+  "owner": { "name": "Jimmy Hsiao", "url": "https://github.com/Fatmylin" },
+  "plugins": [
+    {
+      "name": "now-playing",
+      "source": "./plugins/now-playing",
+      "description": "Now Playing pane, status line and model tool for Apple Music and Spotify on macOS"
+    }
+  ]
+}

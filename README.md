@@ -2,7 +2,9 @@
 
 A Now Playing pane for Apple Music and Spotify inside Claude Code.
 
-<!-- screenshot: docs/screenshot.png -->
+![now-playing in Claude Code: cover art with a spinning record, synced lyrics, and Claude playing a playlist on request](docs/demo.gif)
+
+[Watch the MP4](docs/demo.mp4)
 
 ## Features
 

@@ -82,9 +82,24 @@ export function recordCells(columns: number, rows: number, theta: number, label:
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < columns; x++) {
       const i = (y * columns + x) * 3
-      words[i] = 0x2580
-      words[i + 1] = px(x, y * 2)
-      words[i + 2] = px(x, y * 2 + 1)
+      const top = px(x, y * 2)
+      const bottom = px(x, y * 2 + 1)
+      // A block's foreground is always drawn, so a default-colour half must
+      // never be the foreground: outside the disc it would show as a stripe
+      // in the terminal's text colour.
+      if (top === DEFAULT_COLOR && bottom === DEFAULT_COLOR) {
+        words[i] = 0x20
+        words[i + 1] = DEFAULT_COLOR
+        words[i + 2] = DEFAULT_COLOR
+      } else if (top === DEFAULT_COLOR) {
+        words[i] = 0x2584
+        words[i + 1] = bottom
+        words[i + 2] = DEFAULT_COLOR
+      } else {
+        words[i] = 0x2580
+        words[i + 1] = top
+        words[i + 2] = bottom
+      }
     }
   }
   return toBase64(new Uint8Array(words.buffer))

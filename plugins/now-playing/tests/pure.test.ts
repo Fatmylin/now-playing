@@ -136,3 +136,17 @@ describe('playlists', () => {
     expect(parsePlaylists('garbage')).toEqual([])
   })
 })
+
+describe('record edge', () => {
+  test('no cell draws a block in the terminal default colour', async () => {
+    const DEFAULT = 0x01000000
+    const words = [...new Uint32Array(fromBase64(recordCells(18, 21, 0.6, 0xaa7854)).buffer)]
+    for (let i = 0; i < words.length; i += 3) {
+      const [glyph, fg, bg] = [words[i], words[i + 1], words[i + 2]]
+      if (glyph === 0x2580 || glyph === 0x2584) expect(fg === DEFAULT).toBe(false)
+      if (fg === DEFAULT && bg === DEFAULT) expect(glyph).toBe(0x20)
+    }
+    // the top-right cell lies well outside the disc: a plain space
+    expect(words[17 * 3]).toBe(0x20)
+  })
+})

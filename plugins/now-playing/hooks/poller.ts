@@ -45,3 +45,17 @@ export const SWITCH_EVERY_MS = 30_000
 export function mayRestartForInterval(lastSwitchAt: number, now: number): boolean {
   return now - lastSwitchAt >= SWITCH_EVERY_MS
 }
+
+// The resident's first line, `{"pid":N}`; anything else (a status array) is undefined.
+export function parsePidLine(line: string): number | undefined {
+  try {
+    const v = JSON.parse(line) as unknown
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+      const pid = (v as { pid?: unknown }).pid
+      return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
+    }
+  } catch {
+    // not JSON: a status line parse will say so
+  }
+  return undefined
+}

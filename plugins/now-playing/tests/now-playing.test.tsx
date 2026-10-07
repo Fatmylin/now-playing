@@ -31,7 +31,7 @@ function fakeHost(on: On, players: unknown[], now?: number) {
   // Polls read $.clock.now(), so every test gets one mock clock; mocking a second is not supported.
   const clock = mock.clock(on, now === undefined ? undefined : { now })
   const controls: string[][] = []
-  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | undefined }, requests: [] as string[], isStatusDown: false, statusCalls: 0, playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
+  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | undefined }, requests: [] as string[], isStatusDown: false, statusCalls: 0, psOutput: 'osascript -l JavaScript -e function probe fileHandleWithStandardOutput -- 5000' as string, ps: [] as string[], kills: [] as string[], playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     if (argv[0] === 'osascript' && argv.includes('AppleScript') && argv.some(a => a.includes('favorited'))) {
@@ -72,6 +72,14 @@ function fakeHost(on: On, players: unknown[], now?: number) {
       }
       controls.push(extra)
       return { value: ok('ok') }
+    }
+    if (argv[0] === 'ps') {
+      host.ps.push(String(argv[2]))
+      return { value: ok(host.psOutput) }
+    }
+    if (argv[0] === 'kill') {
+      host.kills.push(String(argv[1]))
+      return { value: ok('') }
     }
     if (argv[0] === 'curl') {
       const url = String(argv[argv.indexOf('--') + 1])
@@ -890,6 +898,7 @@ function residentHost(on: On, failFirst = 0) {
       closed: false,
     }
     spawns.push(s)
+    s.push(`{"pid":${4000 + spawns.length}}\n`) // the loop script's own first line
     try {
       while (true) {
         if (queue.length > 0) {
@@ -1033,8 +1042,8 @@ describe('resident poller', () => {
     await ui.unmount()
   })
 
-  test('a child that goes silent is restarted', async ($, on) => {
-    const { clock } = fakeHost(on, [TRACK, null], 1_000_000)
+  test('a child that goes silent is checked by pid, killed, and restarted', async ($, on) => {
+    const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000)
     const spawns = residentHost(on)
     await start($)
     await until(() => spawns.length === 1)
@@ -1043,10 +1052,71 @@ describe('resident poller', () => {
     await clock.advance(20_000) // under 3 * 5000 + 10000
     await settleLoop()
     expect(spawns.length).toBe(1)
+    expect(host.kills).toEqual([])
     await clock.advance(6000)
     await settleLoop()
+    expect(host.ps).toEqual(['4001']) // asked what that pid runs first
+    expect(host.kills).toEqual(['4001']) // it was ours: killed
     await clock.advance(1000) // the restart backoff
     await until(() => spawns.length === 2)
+  })
+
+  test('a stalled pid that is not our loop is not killed', async ($, on) => {
+    const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000)
+    host.psOutput = '/usr/bin/vim notes.txt'
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    await clock.advance(26_000)
+    await settleLoop()
+    expect(host.ps).toEqual(['4001'])
+    expect(host.kills).toEqual([])
+    await clock.advance(1000)
+    await until(() => spawns.length === 2)
+  })
+
+  test('the pid line is not read as a status', async ($, on) => {
+    const { host } = fakeHost(on, [TRACK, null], 1_000_000)
+    host.isStatusDown = true
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    await settleLoop()
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('an error in the loop body itself does not end the loop', async ($, on) => {
+    const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000)
+    host.isStatusDown = true // the fallback poll fails, so poll() reads the track atom in its catch
+    let isArmed = false
+    let denied = 0
+    on('state.get', (_$, e, next) => {
+      if (isArmed && denied === 0) {
+        denied++
+        return { deny: 'state refused once' }
+      }
+      return next(e)
+    })
+    const spawns = residentHost(on, 3) // three failed spawns, then it works
+    await start($)
+    await settleLoop()
+    await clock.advance(1000)
+    await settleLoop()
+    isArmed = true
+    await clock.advance(2000) // third failure -> fallback -> poll() throws out of the loop body
+    await settleLoop()
+    expect(denied).toBe(1)
+    await clock.advance(5000) // the loop's catch waits, then the loop goes on
+    await settleLoop()
+    await clock.advance(1000)
+    await until(() => spawns.length === 1)
+    spawns[0]!.push(MUSIC_STATUS)
+    await settleLoop()
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
+    await ui.unmount()
   })
 
   test('a second session.start does not start a second loop', async ($, on) => {

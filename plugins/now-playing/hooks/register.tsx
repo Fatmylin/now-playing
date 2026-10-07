@@ -29,7 +29,7 @@ import { accentColor, bmpToHalfBlocks, fromBase64, recordCells } from './artwork
 import { ART_SIZES, layoutFor, readable } from './layout'
 import { lrclibGetUrl, lrclibSearchUrl, lyricWindow, parseLrc, pickSynced, positionNow } from './lyrics'
 import type { LyricLine } from './lyrics'
-import { initialPoller, mayRestartForInterval, onResidentEnded, splitLines } from './poller'
+import { initialPoller, mayRestartForInterval, onResidentEnded, parsePidLine, splitLines } from './poller'
 import { paneTree } from './pane'
 import type { PaneView } from './pane'
 
@@ -154,12 +154,24 @@ const wait = ($: EngineInterface, ms: number) => new Promise<void>(resolve => vo
 let lastSwitchAt = -Infinity
 let isPollerRunning = false
 
+// Kills a stalled resident by pid, but only a pid that still runs our loop script.
+async function killStalled($: EngineInterface, pid: number | undefined) {
+  if (pid === undefined) return
+  const seen = await $.process.run(['ps', '-p', String(pid), '-o', 'command='], { timeoutMs: 5000 })
+  if (seen.exitCode !== 0 || !seen.stdout.includes('fileHandleWithStandardOutput')) {
+    debug($, `now-playing: pid ${pid} is not the resident poller; not killing it`)
+    return
+  }
+  await $.process.run(['kill', String(pid)], { timeoutMs: 5000 })
+}
+
 // One resident osascript at `ms`, one status line per interval. Returns how it
 // ended: 'switch' when the pane opened or closed (the caller restarts it at the
 // other interval; at most once per 30 s), 'ended' when the process ended,
 // errored or stalled (no output for 3 intervals + 10 s).
 async function runResident($: EngineInterface, ms: number): Promise<'switch' | 'ended'> {
   let buffer = ''
+  let pid: number | undefined
   const stream = $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', STATUS_LOOP_JXA, '--', String(ms)] })
   const it = stream[Symbol.asyncIterator]()
   try {
@@ -171,6 +183,8 @@ async function runResident($: EngineInterface, ms: number): Promise<'switch' | '
       const got = await Promise.race([it.next(), stalled]).finally(() => timer?.cancel())
       if (got === 'stall') {
         debug($, 'now-playing: resident poller silent; restarting it')
+        // return() may queue behind the pending next(), so the child is killed by pid.
+        await killStalled($, pid).catch(() => undefined)
         void it.return?.(undefined as never).catch(() => undefined)
         return 'ended'
       }
@@ -181,6 +195,11 @@ async function runResident($: EngineInterface, ms: number): Promise<'switch' | '
       buffer = split.rest
       for (const line of split.lines) {
         if (line.trim() === '') continue
+        const first = parsePidLine(line)
+        if (first !== undefined) {
+          pid = first
+          continue
+        }
         await applyStatus($, parseStatus(line)).catch(() => undefined)
       }
       if (wantedMs() !== ms) {
@@ -231,7 +250,11 @@ async function pollerLoop($: EngineInterface) {
       debug($, 'now-playing: retrying the resident poller')
     } catch (error) {
       debug($, `now-playing: poller loop error: ${String(error)}`)
-      await wait($, 5000)
+      try {
+        await wait($, 5000)
+      } catch {
+        // keep looping: a failed wait must not end the poller
+      }
     }
   }
 }

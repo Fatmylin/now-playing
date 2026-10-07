@@ -35,8 +35,8 @@ function probe(name) {
 export const STATUS_JXA = `${PROBE_JXA}function run() { return JSON.stringify([probe('Music'), probe('Spotify')]) }
 `
 
-// One resident osascript: argv[0] is the interval in ms; it writes one JSON
-// status line per interval, straight to stdout (console.log goes to stderr, and
+// One resident osascript: argv[0] is the interval in ms; it writes {"pid":N}
+// once, then one JSON status line per interval, straight to stdout (console.log goes to stderr, and
 // a plain return prints only at exit). One process sends every Apple Event.
 export const STATUS_LOOP_JXA = `${PROBE_JXA}ObjC.import('Foundation')
 function emit(s) {
@@ -44,6 +44,8 @@ function emit(s) {
 }
 function run(argv) {
   var ms = Number(argv[0])
+  // First line: this process's own pid (an object, never an array), so a stall can be killed by pid.
+  emit(JSON.stringify({ pid: $.NSProcessInfo.processInfo.processIdentifier }))
   while (true) {
     emit(JSON.stringify([probe('Music'), probe('Spotify')]))
     delay(ms / 1000)

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ArtMode, Cover, PlayerApp, RepeatMode, Track } from '../types'
+import type { ArtMode, Cover, Player, PlayerApp, RepeatMode, Track } from '../types'
 import {
   ACTIONS,
   APPS,
@@ -12,6 +12,7 @@ import {
   PLAYMODE_JXA,
   PLAY_PLAYLIST_JXA,
   STATUS_JXA,
+  STATUS_LOOP_JXA,
   describe,
   formatPlaylists,
   itunesArtworkUrl,
@@ -28,12 +29,14 @@ import { accentColor, bmpToHalfBlocks, fromBase64, recordCells } from './artwork
 import { ART_SIZES, layoutFor, readable } from './layout'
 import { lrclibGetUrl, lrclibSearchUrl, lyricWindow, parseLrc, pickSynced, positionNow } from './lyrics'
 import type { LyricLine } from './lyrics'
+import { initialPoller, onResidentEnded, splitLines } from './poller'
 import { paneTree } from './pane'
 import type { PaneView } from './pane'
 
 const PANE = 'now-playing'
 const PANE_COLUMNS = 84
 const POLL_MS = 2000
+const POLL_CLOSED_MS = 5000
 const SPIN_MS = 150
 const ALIASES: Record<string, string> = { n: 'next', b: 'previous', prev: 'previous', k: 'toggle' }
 const LABELS: Record<PlayerApp, string> = { Music: 'Apple Music', Spotify: 'Spotify' }
@@ -55,6 +58,8 @@ const lyricsCache = new Map<string, { status: 'found'; lines: LyricLine[] } | { 
 const lyricsLoading = new Set<string>()
 
 let isPolling = false
+// Status results are applied one at a time, so a one-shot poll and a resident line never double-pause.
+let applying: Promise<unknown> = Promise.resolve()
 // A play-mode write waits ~1.5 s for its read-back; presses of that kind meanwhile are refused.
 const playModeBusy = { shuffle: false, repeat: false }
 // When each app's position was read, and whether the 1 s tick should redraw.
@@ -80,51 +85,116 @@ async function curl($: EngineInterface, args: string[]) {
   return $.process.run(['curl', '-sfL', '--proto', '=https', '--proto-redir', '=https', '--max-time', '10', ...args], { timeoutMs: 15000 })
 }
 
+// The pane is open: poll fast; closed: slowly.
+const wantedMs = () => (isPaneOpen ? POLL_MS : POLL_CLOSED_MS)
+
 async function poll($: EngineInterface): Promise<Track | null> {
   if (isPolling) return read($, trackAtom)
   isPolling = true
   try {
     const { stdout } = await osascript($, STATUS_JXA)
-    const players = parseStatus(stdout)
-    const polledNow = await $.clock.now()
-    // One app just started while another plays: pause the other.
-    if (isExclusive) {
-      for (const app of toPause(lastStates, players)) await osascript($, CONTROL_JXA, [app, 'pause', '0'])
-    }
-    lastStates = Object.fromEntries(players.map(p => [p.app, p.track?.state ?? 'idle']))
-
-    const track = pickActive(players)
-    // The position and the time it was read change together.
-    for (const p of players) polledAt[p.app] = polledNow
-    await update($, playersAtom, () => players)
-    await update($, trackAtom, () => track)
-
-    const status =
-      track === null
-        ? undefined
-        : `${track.state === 'playing' ? '♪' : '⏸'} ${track.name} — ${track.artist}${track.app === 'Music' && track.favorited === true ? ' ♥' : ''}`
-    if (status !== lastStatus) {
-      lastStatus = status
-      $.ui.status(status)
-    }
-    for (const player of players) {
-      if (player.track !== null && player.track.id !== coverFor[player.app]) {
-        coverFor[player.app] = player.track.id
-        // A cover that cannot be fetched is simply not drawn.
-        void fetchCover($, player.track).catch(() => undefined)
-      }
-    }
-    if (isPaneOpen && (await read($, lyricsOnAtom))) {
-      const picked = await read($, sourceAtom)
-      for (const p of players) {
-        if (p.track !== null && (p.app === track?.app || p.app === picked)) void fetchLyrics($, p.track).catch(() => undefined)
-      }
-    }
-    return track
+    return await applyStatus($, parseStatus(stdout))
   } catch {
     return read($, trackAtom)
   } finally {
     isPolling = false
+  }
+}
+
+function applyStatus($: EngineInterface, players: Player[]): Promise<Track | null> {
+  const run = applying.then(() => applyNow($, players))
+  applying = run.catch(() => undefined)
+  return run
+}
+
+async function applyNow($: EngineInterface, players: Player[]): Promise<Track | null> {
+  const polledNow = await $.clock.now()
+  // One app just started while another plays: pause the other.
+  if (isExclusive) {
+    for (const app of toPause(lastStates, players)) await osascript($, CONTROL_JXA, [app, 'pause', '0'])
+  }
+  lastStates = Object.fromEntries(players.map(p => [p.app, p.track?.state ?? 'idle']))
+
+  const track = pickActive(players)
+  // The position and the time it was read change together.
+  for (const p of players) polledAt[p.app] = polledNow
+  await update($, playersAtom, () => players)
+  await update($, trackAtom, () => track)
+
+  const status =
+    track === null
+      ? undefined
+      : `${track.state === 'playing' ? '♪' : '⏸'} ${track.name} — ${track.artist}${track.app === 'Music' && track.favorited === true ? ' ♥' : ''}`
+  if (status !== lastStatus) {
+    lastStatus = status
+    $.ui.status(status)
+  }
+  for (const player of players) {
+    if (player.track !== null && player.track.id !== coverFor[player.app]) {
+      coverFor[player.app] = player.track.id
+      // A cover that cannot be fetched is simply not drawn.
+      void fetchCover($, player.track).catch(() => undefined)
+    }
+  }
+  if (isPaneOpen && (await read($, lyricsOnAtom))) {
+    const picked = await read($, sourceAtom)
+    for (const p of players) {
+      if (p.track !== null && (p.app === track?.app || p.app === picked)) void fetchLyrics($, p.track).catch(() => undefined)
+    }
+  }
+  return track
+}
+
+const debug = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
+
+// One resident osascript at `ms`, one status line per interval. Returns how it
+// ended: 'switch' when the pane opened or closed (the caller restarts it at the
+// other interval), 'ended' when the process ended or errored.
+async function runResident($: EngineInterface, ms: number): Promise<'switch' | 'ended'> {
+  let buffer = ''
+  try {
+    for await (const chunk of $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', STATUS_LOOP_JXA, '--', String(ms)] })) {
+      if (chunk.stream !== 'stdout') continue
+      const split = splitLines(buffer, chunk.text)
+      buffer = split.rest
+      for (const line of split.lines) {
+        if (line.trim() === '') continue
+        await applyStatus($, parseStatus(line)).catch(() => undefined)
+      }
+      if (wantedMs() !== ms) return 'switch'
+    }
+  } catch (error) {
+    debug($, `now-playing: resident poller error: ${String(error)}`)
+  }
+  return 'ended'
+}
+
+// Lives for the session: the resident loop, restarted with a backoff when it
+// ends, and one-shot polling for 5 minutes after 3 quick failures.
+async function pollerLoop($: EngineInterface) {
+  let state = initialPoller
+  while (true) {
+    const startedAt = await $.clock.now()
+    const ended = await runResident($, wantedMs())
+    if (ended === 'switch') {
+      debug($, `now-playing: poll interval now ${wantedMs()} ms`)
+      continue
+    }
+    const now = await $.clock.now()
+    const out = onResidentEnded(state, now, now - startedAt)
+    state = out.state
+    if (out.step.kind === 'restart') {
+      debug($, `now-playing: resident poller ended; restarting in ${out.step.delayMs} ms`)
+      await $.clock.sleep(out.step.delayMs)
+      continue
+    }
+    debug($, `now-playing: resident poller failed repeatedly; one-shot polling for ${out.step.retryMs} ms`)
+    const until = (await $.clock.now()) + out.step.retryMs
+    while ((await $.clock.now()) < until) {
+      await poll($)
+      await $.clock.sleep(wantedMs())
+    }
+    debug($, 'now-playing: retrying the resident poller')
   }
 }
 
@@ -380,10 +450,9 @@ export const register: Register = on => {
     if (saved === 'blocks' || saved === 'image') await update($, artModeAtom, () => saved)
     isExclusive = (await $.store.get('exclusive')) !== false
     if ((await $.store.get('lyrics')) === false) await update($, lyricsOnAtom, () => false)
-    $.clock.every(POLL_MS, () => void poll($))
+    void pollerLoop($).catch(() => undefined)
     $.clock.every(1000, () => void tickOnce($).catch(() => undefined))
     $.clock.every(SPIN_MS, () => void spin($).catch(() => undefined))
-    void poll($)
 
     return next(e)
   })

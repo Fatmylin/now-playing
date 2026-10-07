@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { accentColor, bmpToHalfBlocks, fromBase64, recordCells, toBase64 } from '../hooks/artwork'
 import { hex, layoutFor, readable, wrapLines } from '../hooks/layout'
 import { formatPlaylists, matchPlaylist, parsePlaylists } from '../hooks/player'
+import { RETRY_RESIDENT_MS, backoffMs, initialPoller, onResidentEnded, splitLines } from '../hooks/poller'
 
 // A 2x2 24-bit BMP: row 0 red, green; row 1 blue, white. Rows pad to 8 bytes.
 function bmp2x2(isTopDown: boolean): Uint8Array {
@@ -148,5 +149,57 @@ describe('record edge', () => {
     }
     // the top-right cell lies well outside the disc: a plain space
     expect(words[17 * 3]).toBe(0x20)
+  })
+})
+
+describe('splitLines', () => {
+  test('a line split across two chunks comes out once, whole', () => {
+    const a = splitLines('', '[{"app":')
+    expect(a).toEqual({ lines: [], rest: '[{"app":' })
+    expect(splitLines(a.rest, '"Music"}]\n')).toEqual({ lines: ['[{"app":"Music"}]'], rest: '' })
+  })
+  test('several lines in one chunk, trailing partial kept', () => {
+    expect(splitLines('', 'a\nb\nc')).toEqual({ lines: ['a', 'b'], rest: 'c' })
+  })
+  test('an empty chunk changes nothing', () => {
+    expect(splitLines('abc', '')).toEqual({ lines: [], rest: 'abc' })
+  })
+})
+
+describe('resident poller restart policy', () => {
+  test('backoff doubles from 1 s and caps at 30 s', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 20].map(backoffMs)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000])
+  })
+  test('failures spread beyond 60 s restart with growing backoff', () => {
+    let state = initialPoller
+    const delays: unknown[] = []
+    for (const now of [0, 70_000, 140_000, 210_000]) {
+      const out = onResidentEnded(state, now, 0)
+      state = out.state
+      delays.push(out.step)
+    }
+    expect(delays).toEqual([
+      { kind: 'restart', delayMs: 1000 },
+      { kind: 'restart', delayMs: 2000 },
+      { kind: 'restart', delayMs: 4000 },
+      { kind: 'restart', delayMs: 8000 },
+    ])
+  })
+  test('3 failures within 60 s fall back, to retry after 5 minutes', () => {
+    let out = onResidentEnded(initialPoller, 0, 0)
+    expect(out.step).toEqual({ kind: 'restart', delayMs: 1000 })
+    out = onResidentEnded(out.state, 1000, 0)
+    expect(out.step).toEqual({ kind: 'restart', delayMs: 2000 })
+    out = onResidentEnded(out.state, 3000, 0)
+    expect(out.step).toEqual({ kind: 'fallback', retryMs: RETRY_RESIDENT_MS })
+    expect(RETRY_RESIDENT_MS).toBe(300_000)
+    // the next attempt starts fresh
+    expect(onResidentEnded(out.state, 303_000, 0).step).toEqual({ kind: 'restart', delayMs: 1000 })
+  })
+  test('a process that ran for a while counts as a fresh start', () => {
+    let out = onResidentEnded(initialPoller, 0, 0)
+    out = onResidentEnded(out.state, 1000, 0)
+    out = onResidentEnded(out.state, 100_000, 60_000)
+    expect(out.step).toEqual({ kind: 'restart', delayMs: 1000 })
   })
 })

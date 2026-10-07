@@ -7,7 +7,7 @@ export type Action = (typeof ACTIONS)[number]
 
 // JXA: Application(name).running() never launches the app, and a missing app
 // throws, so neither probe opens Music or Spotify behind the person's back.
-export const STATUS_JXA = `
+const PROBE_JXA = `
 function probe(name) {
   var a
   try { a = Application(name) } catch (e) { return { app: name, isInstalled: false, isRunning: false, track: null } }
@@ -30,7 +30,25 @@ function probe(name) {
     return { app: name, isInstalled: true, isRunning: true, track: r }
   } catch (e) { return { app: name, isInstalled: true, isRunning: true, track: null } }
 }
-function run() { return JSON.stringify([probe('Music'), probe('Spotify')]) }
+`
+
+export const STATUS_JXA = `${PROBE_JXA}function run() { return JSON.stringify([probe('Music'), probe('Spotify')]) }
+`
+
+// One resident osascript: argv[0] is the interval in ms; it writes one JSON
+// status line per interval, straight to stdout (console.log goes to stderr, and
+// a plain return prints only at exit). One process sends every Apple Event.
+export const STATUS_LOOP_JXA = `${PROBE_JXA}ObjC.import('Foundation')
+function emit(s) {
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(s + '\\n').dataUsingEncoding($.NSUTF8StringEncoding))
+}
+function run(argv) {
+  var ms = Number(argv[0])
+  while (true) {
+    emit(JSON.stringify([probe('Music'), probe('Spotify')]))
+    delay(ms / 1000)
+  }
+}
 `
 
 export const CONTROL_JXA = `

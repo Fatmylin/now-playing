@@ -521,13 +521,12 @@ describe('smooth progress', () => {
   test('the 1 s tick moves the open pane without a new poll', async ($, on) => {
     const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000) // playing at 65 s
     host.lyrics.get = JSON.stringify({ syncedLyrics: LRC })
-    mock.store(on)
-    on('session.start', (_$, e) => ({ cwd: e.cwd }))
-    on('command.register', (_$, e) => ({ value: { command: e.name } }))
-    on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
-    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true }) // registers the poll, tick and spin timers
+    const spawns = residentHost(on)
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true }) // starts the resident poller, tick and spin timers
     const ui = await $.ui.mount({ plugin: 'now-playing', surface: 'terminal', component: 'Pane', requestId: 'now-playing', props: PANE_PROPS(84) })
-    await clock.advance(2000) // the next poll reads the track and fetches its lyrics
+    await until(() => spawns.length === 1)
+    spawns[0]!.push(MUSIC_STATUS) // the resident poller reads the track and fetches its lyrics
+    await settleLoop()
     expect((await ui.find({ key: 'row-times' }))?.text).toContain('1:05')
     expect((await ui.find({ key: 'row-lyric-current' }))?.text).toBe('two')
     host.isStatusDown = true // from here on every poll throws, so only the tick can redraw
@@ -864,5 +863,153 @@ describe('status for a named app', () => {
     fakeHost(on, [TRACK, undefined])
     const closed = await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status', app: 'Spotify' })
     expect(String(closed.result)).toBe('Spotify is not running.')
+  })
+})
+
+// Stands in for the resident osascript: each spawn is a stream the test feeds.
+type FakeSpawn = { argv: string[]; push: (text: string) => void; end: () => void; closed: boolean }
+function residentHost(on: On) {
+  const spawns: FakeSpawn[] = []
+  on('process.spawn', async function* (_$, e) {
+    const queue: string[] = []
+    let wake: (() => void) | undefined
+    let isDone = false
+    const s: FakeSpawn = {
+      argv: [...e.argv],
+      push: text => {
+        queue.push(text)
+        wake?.()
+      },
+      end: () => {
+        isDone = true
+        wake?.()
+      },
+      closed: false,
+    }
+    spawns.push(s)
+    try {
+      while (true) {
+        if (queue.length > 0) {
+          yield { stream: 'stdout' as const, text: queue.shift()! }
+          continue
+        }
+        if (isDone) return { value: { code: 0, signal: null } }
+        await new Promise<void>(resolve => {
+          wake = resolve
+        })
+      }
+    } finally {
+      s.closed = true
+    }
+  })
+  mock.store(on)
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
+  return spawns
+}
+
+async function until(cond: () => boolean) {
+  for (let i = 0; i < 5000 && !cond(); i++) await Promise.resolve()
+  expect(cond()).toBe(true)
+}
+const settleLoop = async () => {
+  for (let i = 0; i < 2000; i++) await Promise.resolve()
+}
+
+const statusLine = (...players: unknown[]) => `${JSON.stringify(players)}\n`
+const MUSIC_STATUS = statusLine(
+  { app: 'Music', isInstalled: true, isRunning: true, track: TRACK },
+  { app: 'Spotify', isInstalled: false, isRunning: false, track: null },
+)
+
+describe('resident poller', () => {
+  const start = ($: Engine) => $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  test('a streamed status line updates the pane with no one-shot status call', async ($, on) => {
+    const { host } = fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    host.isStatusDown = true // a one-shot status poll would throw
+    await start($)
+    await until(() => spawns.length === 1)
+    expect(spawns[0]!.argv.join(' ')).toContain('fileHandleWithStandardOutput')
+    spawns[0]!.push(MUSIC_STATUS)
+    await settleLoop()
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a line split across two chunks is read once it is whole', async ($, on) => {
+    const { host } = fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    host.isStatusDown = true
+    await start($)
+    await until(() => spawns.length === 1)
+    spawns[0]!.push(MUSIC_STATUS.slice(0, 40))
+    await settleLoop()
+    let ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeUndefined()
+    await ui.unmount()
+    spawns[0]!.push(MUSIC_STATUS.slice(40))
+    await settleLoop()
+    ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a spawn that ends is started again after a backoff', async ($, on) => {
+    const { clock } = fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    spawns[0]!.end()
+    await settleLoop()
+    expect(spawns.length).toBe(1) // still inside the 1 s backoff
+    await clock.advance(1000)
+    await until(() => spawns.length === 2)
+  })
+
+  test('interval is 5000 with the pane closed and 2000 once it is open', async ($, on) => {
+    fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    expect(spawns[0]!.argv.slice(-2)).toEqual(['--', '5000'])
+    const ui = await mountPane($)
+    spawns[0]!.push(MUSIC_STATUS) // the switch is noticed at the next line
+    await until(() => spawns.length === 2)
+    expect(spawns[0]!.closed).toBe(true)
+    expect(spawns[1]!.argv.slice(-2)).toEqual(['--', '2000'])
+    await ui.unmount()
+  })
+
+  test('three quick failures fall back to one-shot polling', async ($, on) => {
+    const { clock } = fakeHost(on, [TRACK, null], 1_000_000)
+    mock.store(on)
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('command.register', (_$, e) => ({ value: { command: e.name } }))
+    on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
+    on('process.spawn', async function* () {
+      throw new Error('cannot spawn')
+    })
+    await start($)
+    await settleLoop()
+    await clock.advance(1000) // second try
+    await settleLoop()
+    await clock.advance(2000) // third try fails: one-shot polling takes over
+    await settleLoop()
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the tool status still polls once, not through the resident loop', async ($, on) => {
+    fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    const ran = await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status' })
+    expect(String(ran.result)).toContain('Music is playing: "bad guy"')
   })
 })

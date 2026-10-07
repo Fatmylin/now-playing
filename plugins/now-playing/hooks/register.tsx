@@ -29,7 +29,7 @@ import { accentColor, bmpToHalfBlocks, fromBase64, recordCells } from './artwork
 import { ART_SIZES, layoutFor, readable } from './layout'
 import { lrclibGetUrl, lrclibSearchUrl, lyricWindow, parseLrc, pickSynced, positionNow } from './lyrics'
 import type { LyricLine } from './lyrics'
-import { initialPoller, onResidentEnded, splitLines } from './poller'
+import { initialPoller, mayRestartForInterval, onResidentEnded, splitLines } from './poller'
 import { paneTree } from './pane'
 import type { PaneView } from './pane'
 
@@ -147,13 +147,35 @@ async function applyNow($: EngineInterface, players: Player[]): Promise<Track | 
 
 const debug = ($: EngineInterface, text: string) => $.ui.log(text, { to: 'debug' })
 
+// $.clock.sleep belongs to a dispatch; a wait that outlives one uses a timer.
+const wait = ($: EngineInterface, ms: number) => new Promise<void>(resolve => void $.clock.after(ms, resolve))
+
+// A pane that flips open and closed (a render, then a denied blit) must not respawn the child each time.
+let lastSwitchAt = -Infinity
+let isPollerRunning = false
+
 // One resident osascript at `ms`, one status line per interval. Returns how it
 // ended: 'switch' when the pane opened or closed (the caller restarts it at the
-// other interval), 'ended' when the process ended or errored.
+// other interval; at most once per 30 s), 'ended' when the process ended,
+// errored or stalled (no output for 3 intervals + 10 s).
 async function runResident($: EngineInterface, ms: number): Promise<'switch' | 'ended'> {
   let buffer = ''
+  const stream = $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', STATUS_LOOP_JXA, '--', String(ms)] })
+  const it = stream[Symbol.asyncIterator]()
   try {
-    for await (const chunk of $.process.spawn({ argv: ['osascript', '-l', 'JavaScript', '-e', STATUS_LOOP_JXA, '--', String(ms)] })) {
+    while (true) {
+      let timer: { cancel: () => void } | undefined
+      const stalled = new Promise<'stall'>(resolve => {
+        timer = $.clock.after(3 * ms + 10_000, () => resolve('stall'))
+      })
+      const got = await Promise.race([it.next(), stalled]).finally(() => timer?.cancel())
+      if (got === 'stall') {
+        debug($, 'now-playing: resident poller silent; restarting it')
+        void it.return?.(undefined as never).catch(() => undefined)
+        return 'ended'
+      }
+      if (got.done) return 'ended'
+      const chunk = got.value
       if (chunk.stream !== 'stdout') continue
       const split = splitLines(buffer, chunk.text)
       buffer = split.rest
@@ -161,40 +183,56 @@ async function runResident($: EngineInterface, ms: number): Promise<'switch' | '
         if (line.trim() === '') continue
         await applyStatus($, parseStatus(line)).catch(() => undefined)
       }
-      if (wantedMs() !== ms) return 'switch'
+      if (wantedMs() !== ms) {
+        const now = await $.clock.now()
+        if (mayRestartForInterval(lastSwitchAt, now)) {
+          lastSwitchAt = now
+          await it.return?.(undefined as never)
+          return 'switch'
+        }
+      }
     }
   } catch (error) {
     debug($, `now-playing: resident poller error: ${String(error)}`)
+    void it.return?.(undefined as never).catch(() => undefined)
   }
   return 'ended'
 }
 
-// Lives for the session: the resident loop, restarted with a backoff when it
-// ends, and one-shot polling for 5 minutes after 3 quick failures.
+// Lives for the session and never ends on an error: the resident loop,
+// restarted with a backoff when it ends, and one-shot polling for 5 minutes
+// after 3 quick failures.
 async function pollerLoop($: EngineInterface) {
+  if (isPollerRunning) return
+  isPollerRunning = true
   let state = initialPoller
   while (true) {
-    const startedAt = await $.clock.now()
-    const ended = await runResident($, wantedMs())
-    if (ended === 'switch') {
-      debug($, `now-playing: poll interval now ${wantedMs()} ms`)
-      continue
+    try {
+      const startedAt = await $.clock.now()
+      const ended = await runResident($, wantedMs())
+      if (ended === 'switch') {
+        debug($, `now-playing: poll interval now ${wantedMs()} ms`)
+        continue
+      }
+      const now = await $.clock.now()
+      const out = onResidentEnded(state, now, now - startedAt)
+      state = out.state
+      if (out.step.kind === 'restart') {
+        debug($, `now-playing: resident poller ended; restarting in ${out.step.delayMs} ms`)
+        await wait($, out.step.delayMs)
+        continue
+      }
+      debug($, `now-playing: resident poller failed repeatedly; one-shot polling for ${out.step.retryMs} ms`)
+      const until = (await $.clock.now()) + out.step.retryMs
+      while ((await $.clock.now()) < until) {
+        await poll($)
+        await wait($, wantedMs())
+      }
+      debug($, 'now-playing: retrying the resident poller')
+    } catch (error) {
+      debug($, `now-playing: poller loop error: ${String(error)}`)
+      await wait($, 5000)
     }
-    const now = await $.clock.now()
-    const out = onResidentEnded(state, now, now - startedAt)
-    state = out.state
-    if (out.step.kind === 'restart') {
-      debug($, `now-playing: resident poller ended; restarting in ${out.step.delayMs} ms`)
-      await $.clock.sleep(out.step.delayMs)
-      continue
-    }
-    debug($, `now-playing: resident poller failed repeatedly; one-shot polling for ${out.step.retryMs} ms`)
-    const until = (await $.clock.now()) + out.step.retryMs
-    while ((await $.clock.now()) < until) {
-      await poll($)
-      await $.clock.sleep(wantedMs())
-    }
-    debug($, 'now-playing: retrying the resident poller')
   }
 }
 
@@ -450,7 +488,7 @@ export const register: Register = on => {
     if (saved === 'blocks' || saved === 'image') await update($, artModeAtom, () => saved)
     isExclusive = (await $.store.get('exclusive')) !== false
     if ((await $.store.get('lyrics')) === false) await update($, lyricsOnAtom, () => false)
-    void pollerLoop($).catch(() => undefined)
+    void pollerLoop($).catch(error => debug($, `now-playing: poller loop stopped: ${String(error)}`))
     $.clock.every(1000, () => void tickOnce($).catch(() => undefined))
     $.clock.every(SPIN_MS, () => void spin($).catch(() => undefined))
 

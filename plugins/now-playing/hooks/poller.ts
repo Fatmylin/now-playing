@@ -38,3 +38,10 @@ export function onResidentEnded(state: PollerState, now: number, ranMs: number):
   }
   return { state: { failures, consecutive }, step: { kind: 'restart', delayMs: backoffMs(consecutive) } }
 }
+
+// Open/closed may flip back and forth (a render, then a denied blit): the
+// resident child is replaced for a new interval at most once per 30 s.
+export const SWITCH_EVERY_MS = 30_000
+export function mayRestartForInterval(lastSwitchAt: number, now: number): boolean {
+  return now - lastSwitchAt >= SWITCH_EVERY_MS
+}

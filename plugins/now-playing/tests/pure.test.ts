@@ -3,7 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import { accentColor, bmpToHalfBlocks, fromBase64, recordCells, toBase64 } from '../hooks/artwork'
 import { hex, layoutFor, readable, wrapLines } from '../hooks/layout'
 import { formatPlaylists, matchPlaylist, parsePlaylists } from '../hooks/player'
-import { RETRY_RESIDENT_MS, backoffMs, initialPoller, onResidentEnded, splitLines } from '../hooks/poller'
+import { RETRY_RESIDENT_MS, SWITCH_EVERY_MS, backoffMs, mayRestartForInterval, initialPoller, onResidentEnded, splitLines } from '../hooks/poller'
 
 // A 2x2 24-bit BMP: row 0 red, green; row 1 blue, white. Rows pad to 8 bytes.
 function bmp2x2(isTopDown: boolean): Uint8Array {
@@ -201,5 +201,14 @@ describe('resident poller restart policy', () => {
     out = onResidentEnded(out.state, 1000, 0)
     out = onResidentEnded(out.state, 100_000, 60_000)
     expect(out.step).toEqual({ kind: 'restart', delayMs: 1000 })
+  })
+})
+
+describe('interval switch debounce', () => {
+  test('a switch is allowed once per 30 s', () => {
+    expect(SWITCH_EVERY_MS).toBe(30_000)
+    expect(mayRestartForInterval(-Infinity, 1_000)).toBe(true) // the first switch
+    expect(mayRestartForInterval(1_000, 1_000 + 29_999)).toBe(false) // pane flipped back at once
+    expect(mayRestartForInterval(1_000, 1_000 + 30_000)).toBe(true)
   })
 })

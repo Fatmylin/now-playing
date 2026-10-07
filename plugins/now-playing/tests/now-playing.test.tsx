@@ -31,7 +31,7 @@ function fakeHost(on: On, players: unknown[], now?: number) {
   // Polls read $.clock.now(), so every test gets one mock clock; mocking a second is not supported.
   const clock = mock.clock(on, now === undefined ? undefined : { now })
   const controls: string[][] = []
-  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | undefined }, requests: [] as string[], isStatusDown: false, playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
+  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | undefined }, requests: [] as string[], isStatusDown: false, statusCalls: 0, playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     if (argv[0] === 'osascript' && argv.includes('AppleScript') && argv.some(a => a.includes('favorited'))) {
@@ -62,6 +62,7 @@ function fakeHost(on: On, players: unknown[], now?: number) {
       const extra = argv.slice(6)
       if (extra.length === 0 && host.isStatusDown) throw new Error('status is down') // no poll can answer // [osascript -l JavaScript -e script --, ...args]
       if (extra.length === 0) {
+        host.statusCalls++
         const status = ['Music', 'Spotify'].map((app, i) => {
           const p = players[i]
           if (p === 'missing') return { app, isInstalled: false, isRunning: false, track: null }
@@ -868,9 +869,11 @@ describe('status for a named app', () => {
 
 // Stands in for the resident osascript: each spawn is a stream the test feeds.
 type FakeSpawn = { argv: string[]; push: (text: string) => void; end: () => void; closed: boolean }
-function residentHost(on: On) {
+function residentHost(on: On, failFirst = 0) {
   const spawns: FakeSpawn[] = []
+  let calls = 0
   on('process.spawn', async function* (_$, e) {
+    if (calls++ < failFirst) throw new Error('cannot spawn')
     const queue: string[] = []
     let wake: (() => void) | undefined
     let isDone = false
@@ -984,13 +987,15 @@ describe('resident poller', () => {
     await ui.unmount()
   })
 
-  test('three quick failures fall back to one-shot polling', async ($, on) => {
-    const { clock } = fakeHost(on, [TRACK, null], 1_000_000)
+  test('three quick failures fall back to one-shot polling, and the resident loop is retried after 5 minutes', async ($, on) => {
+    const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000)
     mock.store(on)
     on('session.start', (_$, e) => ({ cwd: e.cwd }))
     on('command.register', (_$, e) => ({ value: { command: e.name } }))
     on('tool.register', (_$, e) => ({ value: { tool: e.name } }))
+    let spawnCalls = 0
     on('process.spawn', async function* () {
+      spawnCalls++
       throw new Error('cannot spawn')
     })
     await start($)
@@ -999,17 +1004,69 @@ describe('resident poller', () => {
     await settleLoop()
     await clock.advance(2000) // third try fails: one-shot polling takes over
     await settleLoop()
+    expect(spawnCalls).toBe(3)
+    const ui = await mountPane($)
+    expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
+    await ui.unmount()
+    const before = host.statusCalls
+    await clock.advance(120_000)
+    await settleLoop()
+    expect(spawnCalls).toBe(3) // no spawn during fallback
+    expect(host.statusCalls).toBeGreaterThan(before) // one-shot polls ran
+    await clock.advance(200_000) // past the 5 minutes
+    await settleLoop()
+    expect(spawnCalls).toBeGreaterThan(3)
+  })
+
+  test('a failed spawn does not end the loop: a later spawn still updates the pane', async ($, on) => {
+    const { clock, host } = fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on, 1)
+    host.isStatusDown = true
+    await start($)
+    await settleLoop()
+    await clock.advance(1000)
+    await until(() => spawns.length === 1)
+    spawns[0]!.push(MUSIC_STATUS)
+    await settleLoop()
     const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: 'bad guy' })).toBeDefined()
     await ui.unmount()
   })
 
-  test('the tool status still polls once, not through the resident loop', async ($, on) => {
-    fakeHost(on, [TRACK, null], 1_000_000)
+  test('a child that goes silent is restarted', async ($, on) => {
+    const { clock } = fakeHost(on, [TRACK, null], 1_000_000)
     const spawns = residentHost(on)
     await start($)
     await until(() => spawns.length === 1)
+    spawns[0]!.push(MUSIC_STATUS) // then nothing
+    await settleLoop()
+    await clock.advance(20_000) // under 3 * 5000 + 10000
+    await settleLoop()
+    expect(spawns.length).toBe(1)
+    await clock.advance(6000)
+    await settleLoop()
+    await clock.advance(1000) // the restart backoff
+    await until(() => spawns.length === 2)
+  })
+
+  test('a second session.start does not start a second loop', async ($, on) => {
+    fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    await start($)
+    await start($)
+    await until(() => spawns.length >= 1)
+    await settleLoop()
+    expect(spawns.length).toBe(1)
+  })
+
+  test('the tool status still polls once, not through the resident loop', async ($, on) => {
+    const { host } = fakeHost(on, [TRACK, null], 1_000_000)
+    const spawns = residentHost(on)
+    await start($)
+    await until(() => spawns.length === 1)
+    const before = host.statusCalls
     const ran = await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status' })
     expect(String(ran.result)).toContain('Music is playing: "bad guy"')
+    expect(host.statusCalls).toBe(before + 1) // a one-shot status process.run happened
   })
 })

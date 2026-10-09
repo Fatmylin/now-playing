@@ -268,10 +268,11 @@ async function fetchLyrics($: EngineInterface, track: Track) {
     if (got.exitCode === 0) synced = pickSynced(got.stdout)
     // Lyrics turned off while /get was in flight: no /search, nothing cached.
     if (synced === undefined && !(await read($, lyricsOnAtom))) return
-    for (const title of titleCandidates(track.name)) {
-      if (synced !== undefined) break
-      if (!(await read($, lyricsOnAtom))) return
-      const found = await curl($, ['-H', LRCLIB_AGENT, '-o', '-', '--', lrclibSearchUrl(track, title)])
+    const titles = titleCandidates(track.name)
+    for (let i = 0; i < titles.length && synced === undefined; i++) {
+      // The first search is covered by the check above; re-check before a second.
+      if (i > 0 && !(await read($, lyricsOnAtom))) return
+      const found = await curl($, ['-H', LRCLIB_AGENT, '-o', '-', '--', lrclibSearchUrl(track, titles[i])])
       if (found.exitCode === 0) synced = pickSynced(found.stdout, track.duration)
     }
     const lines = synced === undefined ? [] : parseLrc(synced)

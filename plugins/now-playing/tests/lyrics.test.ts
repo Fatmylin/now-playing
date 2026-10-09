@@ -79,6 +79,9 @@ describe('lrclib helpers', () => {
     expect(titleCandidates('我不想你想你了 (Unplugged in the Woods)')).toEqual(['我不想你想你了'])
     expect(titleCandidates('ABC甲乙')).toEqual(['ABC甲乙'])
     expect(titleCandidates('Strangers')).toEqual(['Strangers'])
+    expect(titleCandidates('我Love You')).toEqual(['我Love You'])
+    expect(titleCandidates('愛 Remix')).toEqual(['愛 Remix'])
+    expect(titleCandidates('愛你！Love')).toEqual(['愛你！Love', '愛你'])
   })
 
   test('lrclibSearchUrl can search with a given title', async () => {

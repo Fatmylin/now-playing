@@ -55,6 +55,8 @@ export function stripTitleSuffix(title: string): string {
 }
 
 const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+const TRAILING_PUNCT = /[\s\p{P}]+$/u
+const cjkCount = (text: string) => [...text].filter(c => CJK.test(c)).length
 const TRAILING_LATIN = /\s*[A-Za-z0-9][A-Za-z0-9 .,'!?&:;+_-]*$/
 
 // Search titles to try, in order. A CJK title with an English subtitle glued on
@@ -63,8 +65,9 @@ export function titleCandidates(title: string): string[] {
   const first = stripTitleSuffix(title)
   const out = [first]
   if (CJK.test(first)) {
-    const bare = first.replace(TRAILING_LATIN, '').trim()
-    if (bare !== '' && bare !== first && CJK.test(bare)) out.push(bare)
+    const bare = first.replace(TRAILING_LATIN, '').replace(TRAILING_PUNCT, '')
+    // A one-character remainder searches too loosely and can match another song.
+    if (bare !== first && cjkCount(bare) >= 2) out.push(bare)
   }
   return out
 }

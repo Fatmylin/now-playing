@@ -31,7 +31,7 @@ function fakeHost(on: On, players: unknown[], now?: number) {
   // Polls read $.clock.now(), so every test gets one mock clock; mocking a second is not supported.
   const clock = mock.clock(on, now === undefined ? undefined : { now })
   const controls: string[][] = []
-  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | undefined }, requests: [] as string[], isStatusDown: false, statusCalls: 0, psOutput: 'osascript -l JavaScript -e function probe fileHandleWithStandardOutput -- 5000' as string, ps: [] as string[], kills: [] as string[], playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
+  const host = { favoriteAnswer: undefined as string | undefined, currentId: TRACK.id as string, isMusicRunning: true, playlists: [] as { name: string; count: number; smart: boolean }[], lyrics: { get: undefined as string | undefined, search: undefined as string | ((trackName: string) => string | undefined) | undefined }, requests: [] as string[], isStatusDown: false, statusCalls: 0, psOutput: 'osascript -l JavaScript -e function probe fileHandleWithStandardOutput -- 5000' as string, ps: [] as string[], kills: [] as string[], playMode: undefined as string | undefined, modes: { Music: { shuffle: false, repeat: 'off' }, Spotify: { shuffle: false, repeat: 'off' } } as Record<string, { shuffle: boolean; repeat: string }> }
   on('process.run', (_$, e) => {
     const argv = [...e.argv]
     if (argv[0] === 'osascript' && argv.includes('AppleScript') && argv.some(a => a.includes('favorited'))) {
@@ -86,7 +86,8 @@ function fakeHost(on: On, players: unknown[], now?: number) {
       for (const kind of ['get', 'search'] as const) {
         if (url.includes(`lrclib.net/api/${kind}`)) {
           host.requests.push(kind)
-          const body = host.lyrics[kind]
+          const hit = host.lyrics[kind]
+          const body = typeof hit === 'function' ? hit(new URL(url).searchParams.get('track_name') ?? '') : hit
           return { value: body === undefined ? { ...ok(''), exitCode: 22 } : ok(body) }
         }
       }
@@ -599,6 +600,28 @@ describe('lyrics', () => {
     await settle($)
     expect(host.requests).toEqual(['get', 'search'])
     expect((await ui.find({ key: 'row-lyric-current' }))?.text).toBe('two')
+    await ui.unmount()
+  })
+
+  test('a CJK title with a glued English subtitle is searched again without it', async ($, on) => {
+    const track = { ...TRACK, name: '甲乙丙丁Strangers', artist: '李佳薇', duration: 210 }
+    const { host } = fakeHost(on, [track, null])
+    host.lyrics.search = name => (name === '甲乙丙丁' ? JSON.stringify([{ duration: 210, syncedLyrics: LRC }]) : '[]')
+    const ui = await mountPane($)
+    await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status' })
+    await settle($)
+    expect(host.requests).toEqual(['get', 'search', 'search'])
+    expect((await ui.find({ key: 'row-lyric-current' }))?.text).toBe('two')
+    await ui.unmount()
+  })
+
+  test('a plain English title makes exactly one search after a /get miss', async ($, on) => {
+    const { host } = fakeHost(on, [TRACK, null])
+    host.lyrics.search = '[]'
+    const ui = await mountPane($)
+    await $.tool.call({ tool: 'mcp__now-playing__music', action: 'status' })
+    await settle($)
+    expect(host.requests).toEqual(['get', 'search'])
     await ui.unmount()
   })
 

@@ -9,6 +9,7 @@ import {
   pickSynced,
   positionNow,
   stripTitleSuffix,
+  titleCandidates,
 } from '../hooks/lyrics'
 
 describe('parseLrc', () => {
@@ -71,6 +72,21 @@ describe('lyric window', () => {
 })
 
 describe('lrclib helpers', () => {
+  test('titleCandidates adds a CJK title without its trailing Latin run', async () => {
+    expect(titleCandidates('甲乙丙丁Strangers')).toEqual(['甲乙丙丁Strangers', '甲乙丙丁'])
+    expect(titleCandidates('告白氣球 Love Confession')).toEqual(['告白氣球 Love Confession', '告白氣球'])
+    expect(titleCandidates('Lookalike')).toEqual(['Lookalike'])
+    expect(titleCandidates('我不想你想你了 (Unplugged in the Woods)')).toEqual(['我不想你想你了'])
+    expect(titleCandidates('ABC甲乙')).toEqual(['ABC甲乙'])
+    expect(titleCandidates('Strangers')).toEqual(['Strangers'])
+  })
+
+  test('lrclibSearchUrl can search with a given title', async () => {
+    expect(lrclibSearchUrl({ artist: '李佳薇', name: '甲乙丙丁Strangers' }, '甲乙丙丁')).toBe(
+      `https://lrclib.net/api/search?artist_name=${encodeURIComponent('李佳薇')}&track_name=${encodeURIComponent('甲乙丙丁')}`,
+    )
+  })
+
   test('stripTitleSuffix drops a trailing bracket or dash suffix', async () => {
     expect(stripTitleSuffix('我不想你想你了 (Unplugged in the Woods)')).toBe('我不想你想你了')
     expect(stripTitleSuffix('Song - Remastered 2011')).toBe('Song')

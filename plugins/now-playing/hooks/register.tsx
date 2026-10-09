@@ -27,7 +27,7 @@ import {
 import type { Action, PlaylistInfo } from './player'
 import { accentColor, bmpToHalfBlocks, fromBase64, recordCells } from './artwork'
 import { ART_SIZES, layoutFor, readable } from './layout'
-import { lrclibGetUrl, lrclibSearchUrl, lyricWindow, parseLrc, pickSynced, positionNow } from './lyrics'
+import { lrclibGetUrl, lrclibSearchUrl, lyricWindow, parseLrc, pickSynced, positionNow, titleCandidates } from './lyrics'
 import type { LyricLine } from './lyrics'
 import { initialPoller, mayRestartForInterval, onResidentEnded, parsePidLine, splitLines } from './poller'
 import { paneTree } from './pane'
@@ -268,8 +268,10 @@ async function fetchLyrics($: EngineInterface, track: Track) {
     if (got.exitCode === 0) synced = pickSynced(got.stdout)
     // Lyrics turned off while /get was in flight: no /search, nothing cached.
     if (synced === undefined && !(await read($, lyricsOnAtom))) return
-    if (synced === undefined) {
-      const found = await curl($, ['-H', LRCLIB_AGENT, '-o', '-', '--', lrclibSearchUrl(track)])
+    for (const title of titleCandidates(track.name)) {
+      if (synced !== undefined) break
+      if (!(await read($, lyricsOnAtom))) return
+      const found = await curl($, ['-H', LRCLIB_AGENT, '-o', '-', '--', lrclibSearchUrl(track, title)])
       if (found.exitCode === 0) synced = pickSynced(found.stdout, track.duration)
     }
     const lines = synced === undefined ? [] : parseLrc(synced)

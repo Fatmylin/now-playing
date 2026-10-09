@@ -54,14 +54,29 @@ export function stripTitleSuffix(title: string): string {
   return stripped === '' ? title : stripped
 }
 
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+const TRAILING_LATIN = /\s*[A-Za-z0-9][A-Za-z0-9 .,'!?&:;+_-]*$/
+
+// Search titles to try, in order. A CJK title with an English subtitle glued on
+// ("甲乙丙丁Strangers") is also tried without that trailing Latin run.
+export function titleCandidates(title: string): string[] {
+  const first = stripTitleSuffix(title)
+  const out = [first]
+  if (CJK.test(first)) {
+    const bare = first.replace(TRAILING_LATIN, '').trim()
+    if (bare !== '' && bare !== first && CJK.test(bare)) out.push(bare)
+  }
+  return out
+}
+
 const enc = encodeURIComponent
 
 export function lrclibGetUrl(t: { artist: string; name: string; album: string; duration: number }): string {
   return `https://lrclib.net/api/get?artist_name=${enc(t.artist)}&track_name=${enc(t.name)}&album_name=${enc(t.album)}&duration=${Math.round(t.duration)}`
 }
 
-export function lrclibSearchUrl(t: { artist: string; name: string }): string {
-  return `https://lrclib.net/api/search?artist_name=${enc(t.artist)}&track_name=${enc(stripTitleSuffix(t.name))}`
+export function lrclibSearchUrl(t: { artist: string; name: string }, title?: string): string {
+  return `https://lrclib.net/api/search?artist_name=${enc(t.artist)}&track_name=${enc(title ?? stripTitleSuffix(t.name))}`
 }
 
 type LrclibRecord = { syncedLyrics?: unknown; instrumental?: unknown; duration?: unknown }
